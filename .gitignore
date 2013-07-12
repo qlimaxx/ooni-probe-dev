@@ -24,3 +24,6 @@ ooniprobe.resume
 !before_i_commit.log
 ## ignore pycharm ide files:
 .idea/
+.vagrant/
+ooni/templates/https_requests.patch
+
