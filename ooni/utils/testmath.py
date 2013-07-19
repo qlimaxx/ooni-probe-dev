@@ -1,0 +1,41 @@
+from BeautifulSoup import BeautifulSoup
+from math import *
+
+#Set of tags found in modern websites and not likely to be found in the same
+#proportion as a block page.
+tags = ['script','meta','link','div','ul','li','span','a','iframe','img','p','form','input']          
+
+
+#TO-DO BEFORE COMMIT: Revise this
+#Given two HTML documents, calculate their cosine similarity based
+#on vectors of their respective tag counts
+def cosine_similarity(experiment, control):
+    exp_vector = construct_vector(experiment)
+    control_vector = construct_vector(control)        
+    return str(dot_product(exp_vector, control_vector) / (magnitude(exp_vector)*magnitude(control_vector)))
+
+#Given two vectors, compute their dot product
+def dot_product(vector1, vector2):
+    dp = 0
+    for i in range(len(vector1)):
+        dp += vector1[i]*vector2[i]
+    return dp
+
+#Args: htmldoc is a string containing the page HTML
+def construct_vector(htmldoc):
+    text = BeautifulSoup(htmldoc)
+    page_vector = []
+    global tags
+    
+    for tag in tags:
+        #Find all instances of the tag we're concerned with
+        #and get the length of the array the search returns.
+        page_vector.append(len(text.findAll(tag)))
+    return page_vector
+        
+#Given a vector, compute its magnitude
+def magnitude(v):
+    m = 0
+    for num in v:
+        m = m + (num * num)
+    return sqrt(m)

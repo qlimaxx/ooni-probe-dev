@@ -11,6 +11,7 @@ from ooni.utils import log
 from ooni.utils.net import userAgents
 from ooni.templates import httpt
 from ooni.errors import failureToString, handleAllFailures
+from ooni.utils.testmath import cosine_similarity
 
 class UsageOptions(usage.Options):
     optParameters = [
@@ -97,6 +98,8 @@ class HTTPRequestsTest(httpt.HTTPTest):
             control_succeeded, control_result = control
 
             if control_succeeded and experiment_succeeded:
+		if len(experiment_result.body) > 0 and len(control_result.body) > 0:
+                        self.report['cosine_similarity'] = cosine_similarity(experiment_result.body,control_result.body)
                 self.compare_body_lengths(len(experiment_result.body),
                         len(control_result.body))
 
