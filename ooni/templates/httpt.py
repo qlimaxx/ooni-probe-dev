@@ -20,7 +20,6 @@ from ooni.utils.net import BodyReceiver, StringProducer, userAgents
 from ooni.utils.txagentwithsocks import Agent, TrueHeaders
 from ooni.errors import handleAllFailures
 
-from urlparse import urlparse
 
 class InvalidSocksProxyOption(Exception):
     pass
