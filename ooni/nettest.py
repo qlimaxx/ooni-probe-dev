@@ -1,6 +1,7 @@
 import os
 import re
 import time
+from hashlib import sha256
 
 from twisted.internet import defer, reactor
 from twisted.trial.runner import filenameToModule
@@ -57,7 +58,7 @@ def loadNetTestString(net_test_string):
         test_cases.extend(get_test_methods(item))
 
     if not test_cases:
-        raise NoTestCasesFound
+        raise e.NoTestCasesFound
 
     return test_cases
 
@@ -71,7 +72,7 @@ def loadNetTestFile(net_test_file):
         test_cases.extend(get_test_methods(item))
 
     if not test_cases:
-        raise NoTestCasesFound
+        raise e.NoTestCasesFound
 
     return test_cases
 
@@ -159,22 +160,24 @@ def getNetTestInformation(net_test_file):
     """
     test_class = getTestClassFromFile(net_test_file)
 
-    test_id = test_class_name_to_name(test_class.name)
+    test_id = os.path.basename(net_test_file).replace('.py', '')
     information = {'id': test_id,
         'name': test_class.name,
         'description': test_class.description,
         'version': test_class.version,
         'arguments': getArguments(test_class),
-        'path': net_test_file
+        'path': net_test_file,
     }
     return information
 
 class NetTestLoader(object):
     method_prefix = 'test'
+    collector = None
 
     def __init__(self, options, test_file=None, test_string=None):
+        self.onionInputRegex =  re.compile("(httpo://[a-z0-9]{16}\.onion)/input/([a-z0-9]{64})$")
         self.options = options
-        test_cases = None
+        self.testCases, test_cases = None, None
 
         if test_file:
             test_cases = loadNetTestFile(test_file)
@@ -183,6 +186,53 @@ class NetTestLoader(object):
 
         if test_cases:
             self.setupTestCases(test_cases)
+   
+    @property
+    def requiredTestHelpers(self):
+        required_test_helpers = []
+        if not self.testCases:
+            return required_test_helpers
+
+        for test_class, test_methods in self.testCases:
+            for option, name in test_class.requiredTestHelpers.items():
+                required_test_helpers.append({
+                    'name': name,
+                    'option': option,
+                    'test_class': test_class
+                })
+        return required_test_helpers
+
+    @property
+    def inputFiles(self):
+        input_files = []
+        if not self.testCases:
+            return input_files
+
+        for test_class, test_methods in self.testCases:
+            if test_class.inputFile:
+                key = test_class.inputFile[0]
+                filename = test_class.localOptions[key]
+                if not filename:
+                    continue
+                input_file = {
+                    'key': key,
+                    'test_class': test_class
+                }
+                m = self.onionInputRegex.match(filename)
+                if m:
+                    input_file['url'] = filename
+                    input_file['address'] = m.group(1)
+                    input_file['hash'] = m.group(2)
+                else:
+                    input_file['filename'] = filename
+                    with open(filename) as f:
+                        h = sha256()
+                        for l in f:
+                            h.update(l)
+                    input_file['hash'] = h.hexdigest()
+                input_files.append(input_file)
+
+        return input_files
 
     @property
     def testDetails(self):
@@ -223,16 +273,22 @@ class NetTestLoader(object):
         if (client_geodata and not config.privacy.includecountry) \
                 or ('countrycode' not in client_geodata):
             client_geodata['countrycode'] = None
+        
+        input_file_hashes = []
+        for input_file in self.inputFiles:
+            input_file_hashes.append(input_file['hash'])
 
         test_details = {'start_time': time.time(),
             'probe_asn': client_geodata['asn'],
             'probe_cc': client_geodata['countrycode'],
             'probe_ip': client_geodata['ip'],
+            'probe_city': client_geodata['city'],
             'test_name': self.testName,
             'test_version': self.testVersion,
             'software_name': 'ooniprobe',
             'software_version': software_version,
-            'options': self.options
+            'options': self.options,
+            'input_hashes': input_file_hashes
         }
         return test_details
 
@@ -295,7 +351,7 @@ class NetTestLoader(object):
             test_cases.extend(self._get_test_methods(item))
 
         if not test_cases:
-            raise NoTestCasesFound
+            raise e.NoTestCasesFound
 
         self.setupTestCases(test_cases)
 
@@ -309,7 +365,7 @@ class NetTestLoader(object):
             test_cases.extend(self._get_test_methods(item))
 
         if not test_cases:
-            raise NoTestCasesFound
+            raise e.NoTestCasesFound
 
         self.setupTestCases(test_cases)
 
@@ -359,11 +415,6 @@ class NetTestLoader(object):
                 checkForRoot()
             test_instance._checkRequiredOptions()
             test_instance._checkValidOptions()
-
-            inputs = test_instance.getInputProcessor()
-            if not inputs:
-                inputs = [None]
-            klass.inputs = inputs
 
     def _get_test_methods(self, item):
         """
@@ -437,6 +488,9 @@ class NetTest(object):
         net_test_loader:
              an instance of :class:ooni.nettest.NetTestLoader containing
              the test to be run.
+
+        report:
+            an instance of :class:ooni.reporter.Reporter
         """
         self.report = report
         self.testCases = net_test_loader.testCases
@@ -463,7 +517,7 @@ class NetTest(object):
 
         return report_results
 
-    def makeMeasurement(self, test_class, test_method, test_input=None):
+    def makeMeasurement(self, test_instance, test_method, test_input=None):
         """
         Creates a new instance of :class:ooni.tasks.Measurement and add's it's
         callbacks and errbacks.
@@ -480,34 +534,58 @@ class NetTest(object):
                 NetTestCase
 
         """
-        measurement = Measurement(test_class, test_method, test_input)
+        measurement = Measurement(test_instance, test_method, test_input)
         measurement.netTest = self
 
         if self.director:
-            measurement.done.addCallback(self.director.measurementSucceeded)
+            measurement.done.addCallback(self.director.measurementSucceeded,
+                    measurement)
             measurement.done.addErrback(self.director.measurementFailed,
-                                        measurement)
-
-        if self.report:
-            measurement.done.addBoth(self.report.write)
-
-        if self.report and self.director:
-            measurement.done.addBoth(self.doneReport)
-
+                    measurement)
         return measurement
+
+    @defer.inlineCallbacks
+    def initializeInputProcessor(self):
+        for test_class, _ in self.testCases:
+            test_class.inputs = yield defer.maybeDeferred(test_class().getInputProcessor)
+            if not test_class.inputs:
+                test_class.inputs = [None]
 
     def generateMeasurements(self):
         """
         This is a generator that yields measurements and registers the
         callbacks for when a measurement is successful or has failed.
         """
+
         for test_class, test_methods in self.testCases:
+            # load the input processor as late as possible
             for input in test_class.inputs:
+                measurements = []
+                test_instance = test_class()
                 for method in test_methods:
                     log.debug("Running %s %s" % (test_class, method))
-                    measurement = self.makeMeasurement(test_class, method, input)
+                    measurement = self.makeMeasurement(test_instance, method, input)
+                    measurements.append(measurement.done)
                     self.state.taskCreated()
                     yield measurement
+
+                # When the measurement.done callbacks have all fired
+                # call the postProcessor before writing the report
+                if self.report:
+                    post = defer.DeferredList(measurements)
+
+                    # Call the postProcessor, which must return a single report
+                    # or a deferred
+                    post.addCallback(test_instance.postProcessor)
+                    def noPostProcessor(failure, report):
+                        failure.trap(e.NoPostProcessor)
+                        return report
+                    post.addErrback(noPostProcessor, test_instance.report)
+                    post.addCallback(self.report.write)
+
+                if self.report and self.director:
+                    #ghetto hax to keep NetTestState counts are accurate
+                    [post.addBoth(self.doneReport) for _ in measurements]
 
         self.state.allTasksScheduled()
 
@@ -565,7 +643,7 @@ class NetTestCase(object):
     version = "0.0.0"
     description = "Sorry, this test has no description :("
 
-    inputs = [None]
+    inputs = None
     inputFile = None
     inputFilename = None
 
@@ -577,7 +655,8 @@ class NetTestCase(object):
     optParameters = None
     baseParameters = None
     baseFlags = None
-
+    
+    requiredTestHelpers = {}
     requiredOptions = []
     requiresRoot = False
 
@@ -594,15 +673,15 @@ class NetTestCase(object):
         """
         pass
 
-    def postProcessor(self, report):
+    def postProcessor(self, measurements):
         """
         Subclass this to do post processing tasks that are to occur once all
-        the test methods have been called. Once per input.
+        the test methods have been called once per input.
         postProcessing works exactly like test methods, in the sense that
         anything that gets written to the object self.report[] will be added to
         the final test report.
         """
-        raise NoPostProcessor
+        raise e.NoPostProcessor
 
     def inputProcessor(self, filename):
         """
@@ -659,11 +738,19 @@ class NetTestCase(object):
 
         We check to see if it's possible to have an input file and if the user
         has specified such file.
+            
+
+        If the operations to be done here are network related or blocking, they
+        should be wrapped in a deferred. That is the return value of this
+        method should be a :class:`twisted.internet.defer.Deferred`.
 
         Returns:
             a generator that will yield one item from the file based on the
             inputProcessor.
         """
+        if self.inputs:
+            return self.inputs
+
         if self.inputFileSpecified:
             self.inputFilename = self.localOptions[self.inputFile[0]]
             return self.inputProcessor(self.inputFilename)
@@ -674,23 +761,14 @@ class NetTestCase(object):
         for option in self.localOptions:
             if option not in self.usageOptions():
                 if not self.inputFile or option not in self.inputFile:
-                    raise InvalidOption
+                    raise e.InvalidOption
 
     def _checkRequiredOptions(self):
         for required_option in self.requiredOptions:
             log.debug("Checking if %s is present" % required_option)
             if required_option not in self.localOptions or \
                 self.localOptions[required_option] == None:
-                raise MissingRequiredOption(required_option)
+                raise e.MissingRequiredOption(required_option)
 
     def __repr__(self):
         return "<%s inputs=%s>" % (self.__class__, self.inputs)
-
-class FailureToLoadNetTest(Exception):
-    pass
-class NoPostProcessor(Exception):
-    pass
-class InvalidOption(Exception):
-    pass
-class MissingRequiredOption(Exception):
-    pass

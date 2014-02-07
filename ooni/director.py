@@ -71,6 +71,10 @@ class Director(object):
 
         self.reportEntryManager = ReportEntryManager()
         self.reportEntryManager.director = self
+        # Link the TaskManager's by least available slots.
+        self.measurementManager.child = self.reportEntryManager
+        # Notify the parent when tasks complete # XXX deadlock!?
+        self.reportEntryManager.parent = self.measurementManager
 
         self.successfulMeasurements = 0
         self.failedMeasurements = 0
@@ -102,6 +106,7 @@ class Director(object):
                 if is_nettest(filename):
                     net_test_file = os.path.join(dirname, filename)
                     nettest = getNetTestInformation(net_test_file)
+                    nettest['category'] = category.replace('/', '')
 
                     if nettest['id'] in nettests:
                         log.err("Found a two tests with the same name %s, %s" %
@@ -117,7 +122,6 @@ class Director(object):
         self.netTests = self.getNetTests()
 
         if config.advanced.start_tor:
-            log.msg("Starting Tor...")
             yield self.startTor()
 
         config.probe_ip = geoip.ProbeIP()
@@ -170,11 +174,12 @@ class Director(object):
     def measurementStarted(self, measurement):
         self.totalMeasurements += 1
 
-    def measurementSucceeded(self, measurement):
-        log.msg("Successfully completed measurement: %s" % measurement)
+    def measurementSucceeded(self, result, measurement):
+        log.debug("Successfully completed measurement: %s" % measurement)
         self.totalMeasurementRuntime += measurement.runtime
         self.successfulMeasurements += 1
-        return measurement.testInstance.report
+        measurement.result = result
+        return measurement
 
     def measurementFailed(self, failure, measurement):
         log.msg("Failed doing measurement: %s" % measurement)
@@ -182,7 +187,8 @@ class Director(object):
 
         self.failedMeasurements += 1
         self.failures.append((failure, measurement))
-        return failure
+        measurement.result = failure
+        return measurement
 
     def reporterFailed(self, failure, net_test):
         """
@@ -224,6 +230,7 @@ class Director(object):
 
         yield net_test.report.open()
 
+        yield net_test.initializeInputProcessor()
         self.measurementManager.schedule(net_test.generateMeasurements())
 
         self.activeNetTests.append(net_test)
@@ -256,6 +263,7 @@ class Director(object):
         Launches a Tor with :param: socks_port :param: control_port
         :param: tor_binary set in ooniprobe.conf
         """
+        log.msg("Starting Tor...")
         @defer.inlineCallbacks
         def state_complete(state):
             config.tor_state = state
@@ -270,7 +278,7 @@ class Director(object):
             config.tor.socks_port = int(socks_port.values()[0])
             config.tor.control_port = int(control_port.values()[0])
 
-            log.debug("Obtained our IP address from a Tor Relay %s" % config.probe_ip)
+            log.msg("Obtained our IP address from a Tor Relay %s" % config.probe_ip)
 
         def setup_failed(failure):
             log.exception(failure)
@@ -287,22 +295,14 @@ class Director(object):
             return state.post_bootstrap
 
         def updates(prog, tag, summary):
-            log.debug("%d%%: %s" % (prog, summary))
+            log.msg("%d%%: %s" % (prog, summary))
 
         tor_config = TorConfig()
         if config.tor.control_port:
             tor_config.ControlPort = config.tor.control_port
-        else:
-            control_port = int(randomFreePort())
-            tor_config.ControlPort = control_port
-            config.tor.control_port = control_port
 
         if config.tor.socks_port:
             tor_config.SocksPort = config.tor.socks_port
-        else:
-            socks_port = int(randomFreePort())
-            tor_config.SocksPort = socks_port
-            config.tor.socks_port = socks_port
 
         if config.tor.data_dir:
             data_dir = os.path.expanduser(config.tor.data_dir)
@@ -327,9 +327,24 @@ class Director(object):
                     else:
                         bridges.append(bridge.strip())
             tor_config.Bridge = bridges
+        
+        if config.tor.torrc:
+            for i in config.tor.torrc.keys():
+                setattr(tor_config, i, config.tor.torrc[i])
 
         tor_config.save()
 
+        if not hasattr(tor_config,'ControlPort'):
+            control_port = int(randomFreePort())
+            tor_config.ControlPort = control_port
+            config.tor.control_port = control_port
+
+        if not hasattr(tor_config,'SocksPort'):
+            socks_port = int(randomFreePort())
+            tor_config.SocksPort = socks_port
+            config.tor.socks_port = socks_port
+
+        tor_config.save()
         log.debug("Setting control port as %s" % tor_config.ControlPort)
         log.debug("Setting SOCKS port as %s" % tor_config.SocksPort)
 
@@ -340,7 +355,6 @@ class Director(object):
         else:
             d = launch_tor(tor_config, reactor,
                            progress_updates=updates)
-
         d.addCallback(setup_complete)
         d.addErrback(setup_failed)
         return d

@@ -1,5 +1,8 @@
 import os
+import sys
 import yaml
+import getpass
+
 from shutil import copyfile
 from os.path import abspath, expanduser
 
@@ -10,6 +13,7 @@ from ooni.utils import Storage
 
 class OConfig(object):
     def __init__(self):
+        self.current_user = getpass.getuser()
         self.global_options = {}
         self.reports = Storage()
         self.scapyFactory = None
@@ -31,12 +35,16 @@ class OConfig(object):
             self.data_directory = abspath(expanduser(self.global_options['datadir']))
         elif self.advanced.get('data_dir'):
             self.data_directory = self.advanced['data_dir']
+        elif hasattr(sys, 'real_prefix'):
+            self.data_directory = os.path.abspath(os.path.join(sys.prefix, 'share', 'ooni'))
         else:
             self.data_directory = '/usr/share/ooni/'
-        self.nettest_directory = os.path.join(self.data_directory, 'nettests')
 
-        self.ooni_home = os.path.join(expanduser('~'), '.ooni')
+        self.nettest_directory = abspath(os.path.join(__file__, '..', 'nettests'))
+
+        self.ooni_home = os.path.join(expanduser('~'+self.current_user), '.ooni')
         self.inputs_directory = os.path.join(self.ooni_home, 'inputs')
+        self.decks_directory = os.path.join(self.ooni_home, 'decks')
         self.reports_directory = os.path.join(self.ooni_home, 'reports')
 
         if self.global_options.get('configfile'):
@@ -51,6 +59,7 @@ class OConfig(object):
             print "Creating it in '%s'." % self.ooni_home
             os.mkdir(self.ooni_home)
             os.mkdir(self.inputs_directory)
+            os.mkdir(self.decks_directory)
         if not os.path.isdir(self.reports_directory):
             os.mkdir(self.reports_directory)
 

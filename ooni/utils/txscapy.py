@@ -10,6 +10,7 @@ from twisted.internet import defer, abstract
 from zope.interface import implements
 
 from scapy.config import conf
+from scapy.supersocket import L3RawSocket
 
 from ooni.utils import log
 from ooni.settings import config
@@ -30,6 +31,13 @@ def pcapdnet_installed():
         False
             if one of the two is absent
     """
+    # In debian libdnet is called dumbnet instead of dnet, but scapy is
+    # expecting "dnet" so we try and import it under such name.
+    try:
+        import dumbnet
+        sys.modules['dnet'] = dumbnet
+    except ImportError: pass
+
     try:
         conf.use_pcap = True
         conf.use_dnet = True
@@ -109,7 +117,7 @@ def hasRawSocketPermission():
     try:
         send(IP(src="1.2.3.4", dst="127.0.0.1"))
         return True
-    except (socket.error, OSError):
+    except Exception:
         return False
 
 class ProtocolNotRegistered(Exception):
@@ -128,10 +136,10 @@ class ScapyFactory(abstract.FileDescriptor):
         abstract.FileDescriptor.__init__(self, reactor)
         if interface == 'auto':
             interface = getDefaultIface()
-        if not super_socket:
-            super_socket = conf.L3socket(iface=interface,
-                    promisc=True, filter='')
-            #super_socket = conf.L2socket(iface=interface)
+        if not super_socket and sys.platform == 'darwin':
+            super_socket = conf.L3socket(iface=interface, promisc=True, filter='')
+        elif not super_socket:
+            super_socket = L3RawSocket(iface=interface, promisc=True)
 
         self.protocols = []
         fdesc._setCloseOnExec(super_socket.ins.fileno())
